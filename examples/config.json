@@ -1,0 +1,13 @@
+{
+    "input_dir": "../vtt",
+    "output_dir": "../vtt/zh",
+    "done_dir": "../vtt/done",
+    "log_dir": "../logs",
+    "aws_region": "us-west-2",
+    "model_id": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "max_retries": 5,
+    "retry_delay": 2,
+    "api_sleep_time": 5,
+    "min_sleep_time": 180,
+    "max_sleep_time": 300
+}

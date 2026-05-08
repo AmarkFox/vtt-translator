@@ -103,6 +103,7 @@ All options live in a JSON file (or can be overridden on the CLI). The most impo
 | `model_id` | `us.anthropic.claude-3-7-sonnet-20250219-v1:0` | Model identifier for the provider. |
 | `aws_region` | `us-west-2` | AWS region for Bedrock. |
 | `max_tokens` | `4096` | Max tokens the model may return per call. |
+| `proxy_url` | `null` | Optional HTTP(S) proxy for provider traffic, e.g. `"http://127.0.0.1:8118"`. Leave `null` for a direct connection. |
 | `source_language` | `en` | Source language code. |
 | `target_language` | `zh` | Target language code (also used as the output file suffix, e.g. `name-zh.vtt`). |
 | `chunk_size` | `50` | Number of captions per LLM call. Larger = fewer calls + better global context, but more tokens per call. |

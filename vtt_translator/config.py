@@ -47,6 +47,14 @@ class Config(BaseModel):
     )
     aws_region: str = Field(default="us-west-2", description="AWS region for Bedrock")
     max_tokens: int = Field(default=4096, ge=256, le=200000, description="Max tokens for LLM response")
+    proxy_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional HTTP(S) proxy URL for the LLM provider, e.g. "
+            "'http://127.0.0.1:8118'. When set, both HTTP and HTTPS traffic "
+            "to the provider go through this proxy. Leave null to connect directly."
+        ),
+    )
 
     # -------- Languages --------
     source_language: str = Field(default="en", description="Source language code")

@@ -5,9 +5,10 @@
     "log_dir": "./logs",
 
     "provider": "bedrock",
-    "model_id": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "model_id": "global.anthropic.claude-opus-4-6-v1",
     "aws_region": "us-west-2",
     "max_tokens": 4096,
+    "proxy_url": null,
 
     "source_language": "en",
     "target_language": "zh",
@@ -26,5 +27,7 @@
     "fallback_to_source": true,
     "fallback_marker": "",
 
-    "max_concurrent_files": 1
+    "max_concurrent_files": 1,
+    "max_concurrent_chunks": 3,
+    "enable_resume": true
 }

@@ -42,11 +42,19 @@ class Config(BaseModel):
     # -------- LLM provider --------
     provider: str = Field(default="bedrock", description="LLM provider name (currently: bedrock)")
     model_id: str = Field(
-        default="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        default="global.anthropic.claude-opus-4-6-v1",
         description="Model identifier for the selected provider",
     )
     aws_region: str = Field(default="us-west-2", description="AWS region for Bedrock")
     max_tokens: int = Field(default=4096, ge=256, le=200000, description="Max tokens for LLM response")
+    proxy_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional HTTP(S) proxy URL for the LLM provider, e.g. "
+            "'http://127.0.0.1:8118'. When set, both HTTP and HTTPS traffic "
+            "to the provider go through this proxy. Leave null to connect directly."
+        ),
+    )
 
     # -------- Languages --------
     source_language: str = Field(default="en", description="Source language code")
@@ -73,8 +81,28 @@ class Config(BaseModel):
     )
     fallback_marker: str = Field(default="", description="Suffix appended to fallback captions (for grep-ability)")
 
-    # -------- Concurrency (reserved for phase 2; currently unused) --------
-    max_concurrent_files: int = Field(default=1, ge=1, le=16)
+    # -------- Concurrency --------
+    max_concurrent_files: int = Field(
+        default=1, ge=1, le=16,
+        description="Max files translated in parallel (batch mode). Currently unused; reserved.",
+    )
+    max_concurrent_chunks: int = Field(
+        default=3, ge=1, le=32,
+        description=(
+            "Max chunks translated in parallel per file. Higher = faster but more "
+            "likely to hit provider rate limits; start small and raise if stable."
+        ),
+    )
+
+    # -------- Resumable translation --------
+    enable_resume: bool = Field(
+        default=True,
+        description=(
+            "If True, per-file translation progress is stored under "
+            "<log_dir>/.progress/ and automatically resumed on next run. "
+            "Progress files are deleted after a file is fully translated."
+        ),
+    )
 
     @field_validator("source_language", "target_language")
     @classmethod
@@ -118,3 +146,19 @@ class Config(BaseModel):
     def source_language_name(self) -> str:
         """Human-readable name for the source language."""
         return LANGUAGE_NAMES.get(self.source_language, self.source_language)
+
+    def resume_fingerprint(self) -> dict:
+        """Subset of settings that must match for a progress file to be reused.
+
+        If any of these change between runs, the cached translations from the
+        previous run are invalidated and a full retranslation is performed.
+        Note: chunk_size is intentionally NOT included here — we store
+        translations at the caption level, so resuming with a different
+        chunk_size just reuses already-translated captions.
+        """
+        return {
+            "provider": self.provider,
+            "model_id": self.model_id,
+            "source_language": self.source_language,
+            "target_language": self.target_language,
+        }

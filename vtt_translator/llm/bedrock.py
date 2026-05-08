@@ -9,6 +9,7 @@ import time
 from typing import Optional
 
 import boto3
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError, BotoCoreError
 
 from .base import LLMProvider, RateLimitError, TranslationError
@@ -40,6 +41,7 @@ class BedrockProvider(LLMProvider):
         retry_base_delay: float = 2.0,
         retry_max_delay: float = 60.0,
         post_call_sleep: float = 0.0,
+        proxy_url: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self._model_id = model_id
@@ -48,9 +50,23 @@ class BedrockProvider(LLMProvider):
         self.retry_base_delay = retry_base_delay
         self.retry_max_delay = retry_max_delay
         self.post_call_sleep = post_call_sleep
+        self.proxy_url = proxy_url
         self.logger = logger or logging.getLogger(__name__)
 
-        self._client = boto3.client("bedrock-runtime", region_name=region)
+        # botocore does NOT read HTTP_PROXY / HTTPS_PROXY env vars the way
+        # requests / urllib do, so we wire the proxy explicitly here.
+        boto_kwargs = {}
+        if proxy_url:
+            self.logger.info("Bedrock client using proxy: %s", proxy_url)
+            boto_kwargs["config"] = BotoConfig(
+                proxies={"http": proxy_url, "https": proxy_url}
+            )
+        else:
+            self.logger.debug("Bedrock client using direct connection (no proxy)")
+
+        self._client = boto3.client(
+            "bedrock-runtime", region_name=region, **boto_kwargs
+        )
 
     @property
     def model_id(self) -> str:

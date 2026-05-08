@@ -24,6 +24,9 @@ wheels/
 logs/
 *.log
 
+# Translation progress files (stored under log_dir/.progress/)
+.progress/
+
 # Environment
 .env
 .venv

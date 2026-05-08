@@ -25,6 +25,7 @@ def create_provider(config: Config, logger: Optional[logging.Logger] = None) -> 
             retry_base_delay=config.retry_base_delay,
             retry_max_delay=config.retry_max_delay,
             post_call_sleep=config.api_sleep_time,
+            proxy_url=config.proxy_url,
             logger=logger,
         )
     raise ValueError(

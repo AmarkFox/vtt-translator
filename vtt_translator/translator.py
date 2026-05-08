@@ -18,6 +18,7 @@ Strategy:
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
@@ -34,6 +35,18 @@ from .vtt_parser import Caption, parse_vtt, write_vtt
 
 # Max times we retry a whole chunk when numbered coverage is incomplete.
 _CHUNK_RETRY_LIMIT = 1
+
+
+def _format_duration(seconds: float) -> str:
+    """Render a duration as e.g. '3m12s' or '45s'."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, s = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{s:02d}s"
+    hours, m = divmod(minutes, 60)
+    return f"{hours}h{m:02d}m{s:02d}s"
 
 
 class VttTranslator:
@@ -141,12 +154,16 @@ class VttTranslator:
                 "Translating %d chunk(s) with up to %d worker(s)",
                 len(pending), max_workers,
             )
+            run_start = time.monotonic()
+            total_chunks = len(chunks)
 
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="vtt-chunk") as ex:
-                future_to_meta: Dict[Future, Tuple[int, Chunk]] = {
-                    ex.submit(self._translate_chunk, chunk): (i, chunk)
-                    for i, chunk in pending
-                }
+                future_to_meta: Dict[Future, Tuple[int, Chunk]] = {}
+                for i, chunk in pending:
+                    # Each chunk carries a human-readable tag so the provider
+                    # and worker can include it in log lines.
+                    tag = f"chunk {i + 1}/{total_chunks}"
+                    future_to_meta[ex.submit(self._translate_chunk, chunk, tag)] = (i, chunk)
 
                 completed = 0
                 for fut in as_completed(future_to_meta):
@@ -159,14 +176,23 @@ class VttTranslator:
                         # Treat every target caption in this chunk as failed;
                         # later code will source-fallback them.
                         self.logger.exception(
-                            "Unexpected error translating chunk %d: %s", i + 1, e,
+                            "Unexpected error translating chunk %d/%d: %s",
+                            i + 1, total_chunks, e,
                         )
                         chunk_results = {}
                         chunk_failures = len(chunk.target)
 
+                    # Progress + ETA. Only meaningful after the second
+                    # completion so we have a rate estimate.
+                    eta_str = ""
+                    if completed >= 2 and completed < len(pending):
+                        elapsed = time.monotonic() - run_start
+                        per_chunk = elapsed / completed
+                        remaining = per_chunk * (len(pending) - completed)
+                        eta_str = f", ETA {_format_duration(remaining)}"
                     self.logger.info(
-                        "Chunk %d/%d done (%d/%d completed this run)",
-                        i + 1, len(chunks), completed, len(pending),
+                        "Chunk %d/%d done (%d/%d completed this run%s)",
+                        i + 1, total_chunks, completed, len(pending), eta_str,
                     )
 
                     # Merge results atomically and persist progress.
@@ -205,10 +231,18 @@ class VttTranslator:
         return True
 
     # ----------------------------------------------------------- Internals
-    def _translate_chunk(self, chunk: Chunk) -> Tuple[Dict[int, str], int]:
+    def _translate_chunk(
+        self, chunk: Chunk, tag: str = "chunk",
+    ) -> Tuple[Dict[int, str], int]:
         """Translate one chunk. Returns (results-by-source-index, failure_count).
 
         Safe to call from a worker thread: uses no shared mutable state.
+
+        Args:
+            chunk: Captions plus optional context windows.
+            tag: Human-readable identifier (e.g. ``"chunk 3/12"``). Included
+                in log lines and propagated to the LLM provider so its retry
+                messages are attributable to the right work item.
         """
         target = chunk.target
         expected = len(target)
@@ -216,14 +250,14 @@ class VttTranslator:
             return {}, 0
 
         self.logger.info(
-            "Translating chunk (%d captions, +%d/+%d context)",
-            expected, len(chunk.prev_context), len(chunk.next_context),
+            "Translating %s (%d captions, +%d/+%d context)",
+            tag, expected, len(chunk.prev_context), len(chunk.next_context),
         )
 
         # Map in-chunk 1-based numbers -> source Caption.index.
         idx_map = {i + 1: cap.index for i, cap in enumerate(target)}
 
-        parsed = self._call_with_chunk_retry(chunk)
+        parsed = self._call_with_chunk_retry(chunk, tag=tag)
 
         results: Dict[int, str] = {}
         for local_idx, text in parsed.items():
@@ -235,22 +269,28 @@ class VttTranslator:
         failure_count = 0
         for local_idx in missing_local:
             cap = target[local_idx - 1]
-            self.logger.info(
+            # Demoted to DEBUG: this is noisy on files with flaky numbered
+            # responses and doesn't help at the batch level. The warning
+            # below still fires when fallback fails.
+            self.logger.debug(
                 "Single-caption fallback for source index %d: %r",
                 cap.index, cap.text[:80],
             )
-            text = self._translate_single_caption(cap)
+            text = self._translate_single_caption(cap, tag=tag)
             if text is None:
                 failure_count += 1
                 text = self._source_fallback(cap)
                 self.logger.warning(
-                    "Falling back to source text for caption %d", cap.index,
+                    "Falling back to source text for caption %d (%s)",
+                    cap.index, tag,
                 )
             results[cap.index] = text
 
         return results, failure_count
 
-    def _call_with_chunk_retry(self, chunk: Chunk) -> Dict[int, str]:
+    def _call_with_chunk_retry(
+        self, chunk: Chunk, *, tag: str = "chunk",
+    ) -> Dict[int, str]:
         """Send a chunk to the LLM, retrying once if coverage is incomplete."""
         attempt = 0
         best_parsed: Dict[int, str] = {}
@@ -263,9 +303,14 @@ class VttTranslator:
                 target_lang=self.config.target_language_name(),
             )
             try:
-                response = self.provider.complete(prompt, max_tokens=self.config.max_tokens)
+                response = self.provider.complete(
+                    prompt, max_tokens=self.config.max_tokens, tag=tag,
+                )
             except TranslationError as e:
-                self.logger.error("Chunk LLM call failed (attempt %d): %s", attempt + 1, e)
+                self.logger.error(
+                    "LLM call failed for %s (attempt %d): %s",
+                    tag, attempt + 1, e,
+                )
                 return best_parsed
 
             parsed = parse_numbered_response(response)
@@ -278,14 +323,16 @@ class VttTranslator:
                 return parsed
 
             self.logger.warning(
-                "Incomplete numbered response (attempt %d): got %d/%d, missing=%s, unexpected=%s",
-                attempt + 1, len(parsed), expected, missing[:5], unexpected[:5],
+                "Incomplete numbered response for %s (attempt %d): got %d/%d, missing=%s, unexpected=%s",
+                tag, attempt + 1, len(parsed), expected, missing[:5], unexpected[:5],
             )
             attempt += 1
 
         return best_parsed
 
-    def _translate_single_caption(self, cap: Caption) -> Optional[str]:
+    def _translate_single_caption(
+        self, cap: Caption, *, tag: str = "single-caption",
+    ) -> Optional[str]:
         """Translate a single caption in isolation. Returns None on failure."""
         prompt = build_single_prompt(
             cap.text,
@@ -293,9 +340,16 @@ class VttTranslator:
             target_lang=self.config.target_language_name(),
         )
         try:
-            text = self.provider.complete(prompt, max_tokens=self.config.max_tokens)
+            text = self.provider.complete(
+                prompt,
+                max_tokens=self.config.max_tokens,
+                tag=f"{tag}/cap-{cap.index}",
+            )
         except TranslationError as e:
-            self.logger.error("Single-caption LLM call failed for index %d: %s", cap.index, e)
+            self.logger.error(
+                "Single-caption LLM call failed for caption %d (%s): %s",
+                cap.index, tag, e,
+            )
             return None
 
         # Strip any accidental `[N]` prefix the model may have added.

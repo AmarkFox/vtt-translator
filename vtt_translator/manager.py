@@ -27,8 +27,12 @@ class VttTranslatorManager:
         self,
         config: Optional[Config | str | Path | dict] = None,
         logger: Optional[logging.Logger] = None,
+        *,
+        resume: Optional[bool] = None,
     ) -> None:
         self.config = _coerce_config(config)
+        # resume=None -> use config.enable_resume per-file; True/False -> override.
+        self.resume = resume
 
         for key in ("input_dir", "output_dir", "done_dir", "log_dir"):
             ensure_dir(getattr(self.config, key))
@@ -77,7 +81,7 @@ class VttTranslatorManager:
         start = time.time()
         try:
             translator = VttTranslator(self.config, file_logger, provider=self.provider)
-            success = translator.translate_vtt(input_file, output_file)
+            success = translator.translate_vtt(input_file, output_file, resume=self.resume)
         except Exception as e:
             self.logger.exception("Unhandled error for %s: %s", input_file.name, e)
             return False

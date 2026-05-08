@@ -30,6 +30,14 @@ def _add_common_config_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--target-language", help="Target language code (e.g. zh)")
     p.add_argument("--chunk-size", type=int, help="Captions per translation batch")
     p.add_argument("--context-window", type=int, help="Context-only captions before/after each batch")
+    p.add_argument(
+        "--max-concurrent-chunks", type=int,
+        help="Max chunks translated in parallel per file",
+    )
+    p.add_argument(
+        "--no-resume", action="store_true",
+        help="Ignore any existing progress file and retranslate from scratch",
+    )
     p.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
 
 
@@ -71,6 +79,7 @@ def _load_config_from_args(args: argparse.Namespace) -> Config:
         "target_language": getattr(args, "target_language", None),
         "chunk_size": getattr(args, "chunk_size", None),
         "context_window": getattr(args, "context_window", None),
+        "max_concurrent_chunks": getattr(args, "max_concurrent_chunks", None),
         "input_dir": getattr(args, "input_dir", None),
         "output_dir": getattr(args, "output_dir", None),
         "done_dir": getattr(args, "done_dir", None),
@@ -88,7 +97,8 @@ def _cmd_translate(args: argparse.Namespace) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
     )
     translator = VttTranslator(cfg, logger)
-    ok = translator.translate_vtt(args.input, args.output)
+    resume = False if args.no_resume else None
+    ok = translator.translate_vtt(args.input, args.output, resume=resume)
     if ok:
         print(f"Translated -> {args.output}")
         return 0
@@ -98,7 +108,8 @@ def _cmd_translate(args: argparse.Namespace) -> int:
 
 def _cmd_batch(args: argparse.Namespace) -> int:
     cfg = _load_config_from_args(args)
-    manager = VttTranslatorManager(cfg)
+    resume = False if args.no_resume else None
+    manager = VttTranslatorManager(cfg, resume=resume)
     if args.verbose:
         manager.logger.setLevel(logging.DEBUG)
     success, total = manager.batch_process(args.start, args.end)
@@ -127,6 +138,8 @@ def _cmd_estimate(args: argparse.Namespace) -> int:
     print(f"Chunk size:      {cfg.chunk_size}")
     print(f"Context window:  {cfg.context_window}")
     print(f"Chunks:          {len(chunks)} (= number of LLM calls, before fallbacks)")
+    print(f"Concurrency:     {cfg.max_concurrent_chunks} chunk(s) in parallel")
+    print(f"Resume enabled:  {cfg.enable_resume}")
     print(f"Model:           {cfg.provider}/{cfg.model_id}")
     print(f"Source -> Target:{cfg.source_language} -> {cfg.target_language}")
     return 0

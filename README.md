@@ -1,135 +1,165 @@
-# VTT字幕翻译系统
+# VTT Subtitle Translator
 
-一个用于将英文VTT字幕文件翻译成中文的工具，使用AWS Bedrock的Claude模型进行翻译。
+A Python tool that translates WebVTT subtitle files using LLMs. Version 2.0 uses a **numbered batch translation** strategy: the whole file is translated in large chunks with surrounding context, giving the model a global view of the transcript so terminology and tone stay consistent.
 
-## 功能特点
+## Features
 
-- 智能解析VTT字幕文件，支持带行号和不带行号的格式
-- 将字幕分组为语义单元，提高翻译质量
-- 使用AWS Bedrock的Claude模型进行高质量翻译
-- 智能分配翻译结果，保持字幕的自然断句
-- 支持单文件翻译和批量翻译
-- 详细的日志记录，方便追踪处理过程
-- 可配置的参数，适应不同的使用场景
+- **Numbered batch translation** — each chunk of ~50 captions is sent in one call using `[N]` markers; the response is parsed back to the original captions 1:1.
+- **Context windows** — captions before/after each chunk are provided to the model for context without being translated.
+- **Multi-language** — `source_language` / `target_language` are configurable; no hard-coded Chinese.
+- **Pluggable LLM providers** — `LLMProvider` abstract interface; AWS Bedrock (Anthropic Claude) implemented today, OpenAI/etc. can be added without touching the core.
+- **Robust retries** — exponential backoff with full jitter; transient Bedrock errors and network errors are retried automatically.
+- **Graceful fallback** — if a caption fails to translate after retries and a single-shot retranslation, the original source text is used as a last resort so your output file is always complete.
+- **Batch mode** — scan a directory, translate files in order, random inter-file sleep to avoid throttling, move processed files to a `done/` dir.
+- **Pydantic-validated config** — typed config model with clear error messages for bad values.
+- **webvtt-py parser** — correct handling of standard VTT features including multi-line captions.
 
-## 安装
+## Requirements
 
-### 前置条件
+- Python 3.10+
+- AWS credentials with Bedrock access to the configured model
+- Dependencies listed in `requirements.txt`
 
-- Python 3.7+
-- AWS账号，并配置好AWS凭证
-- AWS Bedrock访问权限，可以使用Claude模型
-
-### 安装步骤
-
-1. 克隆代码库：
+## Installation
 
 ```bash
 git clone <repository-url>
-cd vtt_translator
-```
-
-2. 安装依赖：
-
-```bash
+cd vtt-translator
 pip install -r requirements.txt
 ```
 
-3. 配置AWS凭证：
-
-确保已经配置好AWS凭证，可以通过以下方式之一：
-- 使用AWS CLI: `aws configure`
-- 设置环境变量: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
-- 使用凭证文件: `~/.aws/credentials`
-
-## 使用方法
-
-### 命令行使用
-
-#### 翻译单个文件
+Configure AWS credentials (any standard method works):
 
 ```bash
-python -m vtt_translator.main translate input.vtt output.vtt
+aws configure
+# or export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION
 ```
 
-#### 批量翻译文件
+## Quickstart
+
+### Generate a default config
 
 ```bash
-python -m vtt_translator.main batch --input-dir /path/to/vtt --output-dir /path/to/output --done-dir /path/to/done
+python main.py config my_config.json
 ```
 
-#### 生成配置文件
+This writes a JSON file with every tunable option. Edit it to taste — see `examples/config.example.json` for reference.
+
+### Estimate before you translate
+
+Dry-run a file to see how many LLM calls and characters are involved, without spending tokens:
 
 ```bash
-python -m vtt_translator.main config config.json
+python main.py estimate path/to/input.vtt --config my_config.json
 ```
 
-### 作为库使用
+### Translate a single file
 
-#### 翻译单个文件
+```bash
+python main.py translate input.vtt output.vtt --config my_config.json
+```
+
+Override specific options on the command line:
+
+```bash
+python main.py translate input.vtt output.vtt \
+    --target-language ja \
+    --chunk-size 30 \
+    --model us.anthropic.claude-3-7-sonnet-20250219-v1:0
+```
+
+### Batch translate a directory
+
+```bash
+python main.py batch \
+    --input-dir ./vtt \
+    --output-dir ./vtt/zh \
+    --done-dir ./vtt/done \
+    --start 0 --end 10
+```
+
+Files already present in `done_dir` or whose translated counterpart already exists in `output_dir` are skipped.
+
+### Use as a library
 
 ```python
-from vtt_translator import VttTranslator
+from vtt_translator import Config, VttTranslator, VttTranslatorManager
 
-translator = VttTranslator()
-translator.translate_vtt('input.vtt', 'output.vtt')
+# Single file
+cfg = Config.load("my_config.json")
+VttTranslator(cfg).translate_vtt("input.vtt", "output.vtt")
+
+# Batch
+VttTranslatorManager(cfg).batch_process()
 ```
 
-#### 批量翻译文件
+## Configuration
 
-```python
-from vtt_translator import VttTranslatorManager
+All options live in a JSON file (or can be overridden on the CLI). The most important ones:
 
-manager = VttTranslatorManager()
-manager.batch_process()
+| Key | Default | Meaning |
+|---|---|---|
+| `provider` | `bedrock` | LLM provider name (only `bedrock` today). |
+| `model_id` | `us.anthropic.claude-3-7-sonnet-20250219-v1:0` | Model identifier for the provider. |
+| `aws_region` | `us-west-2` | AWS region for Bedrock. |
+| `max_tokens` | `4096` | Max tokens the model may return per call. |
+| `source_language` | `en` | Source language code. |
+| `target_language` | `zh` | Target language code (also used as the output file suffix, e.g. `name-zh.vtt`). |
+| `chunk_size` | `50` | Number of captions per LLM call. Larger = fewer calls + better global context, but more tokens per call. |
+| `context_window` | `5` | Captions to include before/after each chunk as context only (not translated). |
+| `max_retries` | `5` | Max retries for transient errors (throttling, 5xx, network). |
+| `retry_base_delay` | `2.0` | Base delay for exponential backoff. |
+| `retry_max_delay` | `60.0` | Cap on any single backoff wait. |
+| `api_sleep_time` | `2.0` | Fixed sleep after each successful LLM call. |
+| `min_sleep_time` / `max_sleep_time` | `180` / `300` | Random sleep between files in batch mode. |
+| `fallback_to_source` | `true` | If translation fails, use the original text (rather than fail the whole file). |
+| `fallback_marker` | `""` | Optional suffix appended to fallback captions so they are grep-able. |
+| `input_dir` / `output_dir` / `done_dir` / `log_dir` | `./vtt`, `./vtt/zh`, `./vtt/done`, `./logs` | Directory layout. |
+
+## How translation works
+
+1. `vtt_parser.parse_vtt` reads the file into `Caption` objects (timestamp + text + stable source index).
+2. `chunker.split_into_chunks` splits the captions into batches of `chunk_size`, each with a `context_window` of surrounding context.
+3. For each chunk, `prompt_builder.build_batch_prompt` produces a numbered prompt:
+   ```
+   [1] First caption text.
+   [2] Second caption text.
+   ...
+   ```
+4. The LLM is asked to return the same format. `validator.parse_numbered_response` maps the numbers back to the original captions.
+5. If any number is missing from the response, the chunk is retried once. Any still-missing caption is translated on its own as a fallback. If *that* also fails, the original text is used (configurable).
+6. `vtt_parser.write_vtt` writes a new VTT file using the original timestamps and the collected translations.
+
+## Project layout
+
+```
+vtt-translator/
+├── main.py                    # CLI entry point
+├── requirements.txt
+├── README.md
+├── examples/
+│   └── config.example.json
+└── vtt_translator/
+    ├── __init__.py
+    ├── config.py              # pydantic Config model
+    ├── utils.py               # logging, file helpers
+    ├── vtt_parser.py          # webvtt-py based parser/writer
+    ├── chunker.py             # chunking with context windows
+    ├── prompt_builder.py      # numbered-batch prompt templates
+    ├── validator.py           # parse + validate LLM responses
+    ├── translator.py          # single-file orchestrator
+    ├── manager.py             # batch manager
+    └── llm/
+        ├── __init__.py
+        ├── base.py            # LLMProvider ABC + error types
+        ├── bedrock.py         # Bedrock/Anthropic implementation
+        └── factory.py         # build provider from Config
 ```
 
-## 配置选项
+## Roadmap
 
-可以通过配置文件或命令行参数设置以下选项：
-
-- `input_dir`: 输入目录
-- `output_dir`: 输出目录
-- `done_dir`: 处理完成目录
-- `log_dir`: 日志目录
-- `aws_region`: AWS区域
-- `model_id`: Claude模型ID
-- `max_retries`: 最大重试次数
-- `retry_delay`: 重试延迟时间
-- `api_sleep_time`: API调用后休眠时间
-- `min_sleep_time`: 批处理最小休眠时间
-- `max_sleep_time`: 批处理最大休眠时间
-
-## 目录结构
-
-```
-vtt_translator/
-├── __init__.py                # 包初始化文件
-├── main.py                    # 命令行入口
-├── vtt_translator_core.py     # 核心翻译模块
-├── vtt_translator_manager.py  # 调度管理模块
-├── vtt_translator_config.py   # 配置模块
-├── vtt_translator_utils.py    # 工具函数模块
-├── requirements.txt           # 依赖包列表
-└── README.md                  # 说明文档
-```
-
-## 示例
-
-### 翻译单个文件
-
-```bash
-python -m vtt_translator.main translate /path/to/input.vtt /path/to/output.vtt
-```
-
-### 批量翻译目录中的前10个文件
-
-```bash
-python -m vtt_translator.main batch --start 0 --end 10
-```
-
-### 使用自定义配置文件
-
-```bash
-python -m vtt_translator.main batch --config /path/to/config.json
-```
+- Concurrent translation of multiple files and/or multiple chunks.
+- Resumable translation (progress file per input).
+- Cost estimation command (token counting + price tables).
+- Additional providers (OpenAI, Gemini, local models).
+- Unit tests and CI.

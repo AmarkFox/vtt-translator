@@ -1,110 +1,150 @@
-"""
-主程序入口，提供命令行接口
+"""CLI entry point for vtt-translator.
+
+Subcommands:
+  translate   Translate a single VTT file.
+  batch       Translate all unprocessed VTT files in a directory.
+  config      Generate a default config file.
+  estimate    Dry-run: parse and chunk a file, print stats without calling the LLM.
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import argparse
+import logging
+import sys
+from pathlib import Path
 
-from vtt_translator.vtt_translator_core import VttTranslator
-from vtt_translator.vtt_translator_manager import VttTranslatorManager
-from vtt_translator.vtt_translator_utils import setup_logger
-from vtt_translator.vtt_translator_config import load_config, save_config, DEFAULT_CONFIG
+from vtt_translator.chunker import split_into_chunks
+from vtt_translator.config import Config
+from vtt_translator.manager import VttTranslatorManager
+from vtt_translator.translator import VttTranslator
+from vtt_translator.utils import setup_logger
+from vtt_translator.vtt_parser import parse_vtt
 
-def parse_args():
-    """
-    解析命令行参数
-    
-    Returns:
-        args: 解析后的参数
-    """
-    parser = argparse.ArgumentParser(description='VTT字幕翻译工具')
-    
-    # 子命令
-    subparsers = parser.add_subparsers(dest='command', help='子命令')
-    
-    # 单文件翻译命令
-    translate_parser = subparsers.add_parser('translate', help='翻译单个VTT文件')
-    translate_parser.add_argument('input', help='输入VTT文件路径')
-    translate_parser.add_argument('output', help='输出VTT文件路径')
-    translate_parser.add_argument('--config', help='配置文件路径')
-    
-    # 批量翻译命令
-    batch_parser = subparsers.add_parser('batch', help='批量翻译VTT文件')
-    batch_parser.add_argument('--start', type=int, default=0, help='起始索引')
-    batch_parser.add_argument('--end', type=int, help='结束索引')
-    batch_parser.add_argument('--input-dir', help='输入目录')
-    batch_parser.add_argument('--output-dir', help='输出目录')
-    batch_parser.add_argument('--done-dir', help='处理完成目录')
-    batch_parser.add_argument('--config', help='配置文件路径')
-    
-    # 生成配置文件命令
-    config_parser = subparsers.add_parser('config', help='生成配置文件')
-    config_parser.add_argument('output', help='配置文件输出路径')
-    
-    return parser.parse_args()
 
-def main():
-    """
-    主函数
-    """
-    args = parse_args()
-    
-    if args.command == 'translate':
-        # 单文件翻译
-        config = load_config(args.config)
-        logger = setup_logger(config['log_dir'])
-        
-        translator = VttTranslator(config, logger)
-        success = translator.translate_vtt(args.input, args.output)
-        
-        if success:
-            print(f"翻译成功，输出文件: {args.output}")
-            return 0
-        else:
-            print("翻译失败")
-            return 1
-    
-    elif args.command == 'batch':
-        # 批量翻译
-        config = load_config(args.config)
-        
-        # 更新配置
-        if args.input_dir:
-            config['input_dir'] = args.input_dir
-        if args.output_dir:
-            config['output_dir'] = args.output_dir
-        if args.done_dir:
-            config['done_dir'] = args.done_dir
-        
-        # 创建管理器
-        manager = VttTranslatorManager(config)
-        
-        # 批量处理
-        success_count, total_count = manager.batch_process(args.start, args.end)
-        
-        if success_count == total_count:
-            print(f"批量翻译完成，成功: {success_count}/{total_count}")
-            return 0
-        else:
-            print(f"批量翻译部分完成，成功: {success_count}/{total_count}")
-            return 1
-    
-    elif args.command == 'config':
-        # 生成配置文件
-        success = save_config(DEFAULT_CONFIG, args.output)
-        
-        if success:
-            print(f"配置文件已生成: {args.output}")
-            return 0
-        else:
-            print("配置文件生成失败")
-            return 1
-    
-    else:
-        # 没有指定命令，显示帮助
-        print("请指定子命令，使用 -h 查看帮助")
-        return 1
+def _add_common_config_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--config", help="Path to JSON config file")
+    p.add_argument("--model", help="Override model_id (e.g. a specific Claude model)")
+    p.add_argument("--provider", help="Override LLM provider (default: bedrock)")
+    p.add_argument("--source-language", help="Source language code (e.g. en)")
+    p.add_argument("--target-language", help="Target language code (e.g. zh)")
+    p.add_argument("--chunk-size", type=int, help="Captions per translation batch")
+    p.add_argument("--context-window", type=int, help="Context-only captions before/after each batch")
+    p.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
 
-if __name__ == '__main__':
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="vtt-translator", description="VTT subtitle translator")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    t = sub.add_parser("translate", help="Translate a single VTT file")
+    t.add_argument("input", help="Input VTT file")
+    t.add_argument("output", help="Output VTT file")
+    _add_common_config_args(t)
+
+    b = sub.add_parser("batch", help="Translate all VTT files in a directory")
+    b.add_argument("--start", type=int, default=0, help="Start index (0-based, default 0)")
+    b.add_argument("--end", type=int, help="End index (exclusive); default: all")
+    b.add_argument("--input-dir", help="Override input directory")
+    b.add_argument("--output-dir", help="Override output directory")
+    b.add_argument("--done-dir", help="Override done directory")
+    _add_common_config_args(b)
+
+    c = sub.add_parser("config", help="Generate a default config file")
+    c.add_argument("output", help="Path to write the generated config JSON")
+
+    e = sub.add_parser("estimate", help="Dry-run: parse & chunk a file without calling the LLM")
+    e.add_argument("input", help="Input VTT file")
+    _add_common_config_args(e)
+
+    return parser
+
+
+def _load_config_from_args(args: argparse.Namespace) -> Config:
+    """Load config from file (if any) and apply CLI overrides."""
+    cfg = Config.load(getattr(args, "config", None))
+
+    overrides = {
+        "model_id": getattr(args, "model", None),
+        "provider": getattr(args, "provider", None),
+        "source_language": getattr(args, "source_language", None),
+        "target_language": getattr(args, "target_language", None),
+        "chunk_size": getattr(args, "chunk_size", None),
+        "context_window": getattr(args, "context_window", None),
+        "input_dir": getattr(args, "input_dir", None),
+        "output_dir": getattr(args, "output_dir", None),
+        "done_dir": getattr(args, "done_dir", None),
+    }
+    clean = {k: v for k, v in overrides.items() if v is not None}
+    if clean:
+        cfg = cfg.model_copy(update=clean)
+    return cfg
+
+
+def _cmd_translate(args: argparse.Namespace) -> int:
+    cfg = _load_config_from_args(args)
+    logger = setup_logger(
+        cfg.log_dir,
+        level=logging.DEBUG if args.verbose else logging.INFO,
+    )
+    translator = VttTranslator(cfg, logger)
+    ok = translator.translate_vtt(args.input, args.output)
+    if ok:
+        print(f"Translated -> {args.output}")
+        return 0
+    print("Translation failed (see logs).", file=sys.stderr)
+    return 1
+
+
+def _cmd_batch(args: argparse.Namespace) -> int:
+    cfg = _load_config_from_args(args)
+    manager = VttTranslatorManager(cfg)
+    if args.verbose:
+        manager.logger.setLevel(logging.DEBUG)
+    success, total = manager.batch_process(args.start, args.end)
+    print(f"Batch: {success}/{total} succeeded")
+    return 0 if success == total else 1
+
+
+def _cmd_config(args: argparse.Namespace) -> int:
+    Config().save(args.output)
+    print(f"Wrote default config -> {args.output}")
+    return 0
+
+
+def _cmd_estimate(args: argparse.Namespace) -> int:
+    cfg = _load_config_from_args(args)
+    captions = parse_vtt(args.input)
+    chunks = split_into_chunks(
+        captions,
+        chunk_size=cfg.chunk_size,
+        context_window=cfg.context_window,
+    )
+    total_chars = sum(len(c.text) for c in captions)
+    print(f"File:            {Path(args.input).name}")
+    print(f"Captions:        {len(captions)}")
+    print(f"Total characters:{total_chars}")
+    print(f"Chunk size:      {cfg.chunk_size}")
+    print(f"Context window:  {cfg.context_window}")
+    print(f"Chunks:          {len(chunks)} (= number of LLM calls, before fallbacks)")
+    print(f"Model:           {cfg.provider}/{cfg.model_id}")
+    print(f"Source -> Target:{cfg.source_language} -> {cfg.target_language}")
+    return 0
+
+
+_COMMANDS = {
+    "translate": _cmd_translate,
+    "batch": _cmd_batch,
+    "config": _cmd_config,
+    "estimate": _cmd_estimate,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    return _COMMANDS[args.command](args)
+
+
+if __name__ == "__main__":
     sys.exit(main())

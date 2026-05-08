@@ -7,11 +7,13 @@ A Python tool that translates WebVTT subtitle files using LLMs. Version 2.0 uses
 - **Numbered batch translation** — each chunk of ~50 captions is sent in one call using `[N]` markers; the response is parsed back to the original captions 1:1.
 - **Context windows** — captions before/after each chunk are provided to the model for context without being translated.
 - **Chunk-level concurrency** — chunks within a single file are translated in parallel (default 3 workers), typically cutting single-file wall time to about 1/3.
+- **ETA logging** — after a couple of chunks complete, the log shows an estimated remaining time.
 - **Resumable translation** — per-file progress is checkpointed after each chunk and automatically resumed on the next run. Survives Ctrl+C, network drops, and provider outages. Disable with `--no-resume`.
 - **Multi-language** — `source_language` / `target_language` are configurable; no hard-coded Chinese.
 - **Pluggable LLM providers** — `LLMProvider` abstract interface; AWS Bedrock (Anthropic Claude) implemented today, OpenAI/etc. can be added without touching the core.
-- **Robust retries** — exponential backoff with full jitter; transient Bedrock errors and network errors are retried automatically.
+- **Robust retries** — exponential backoff with full jitter; transient Bedrock errors and network errors are retried automatically. Retry log lines include the chunk they belong to.
 - **Graceful fallback** — if a caption fails to translate after retries and a single-shot retranslation, the original source text is used as a last resort so your output file is always complete.
+- **Proxy diagnostic** — `check-proxy` subcommand probes the configured proxy and prints the exit IP, so a misconfigured proxy (e.g. Privoxy without a working upstream) is obvious in one second. At startup a translate/batch run also logs the exit IP alongside the proxy URL.
 - **Batch mode** — scan a directory, translate files in order, random inter-file sleep to avoid throttling, move processed files to a `done/` dir.
 - **Pydantic-validated config** — typed config model with clear error messages for bad values.
 - **webvtt-py parser** — correct handling of standard VTT features including multi-line captions.
@@ -89,6 +91,34 @@ python main.py batch \
 
 Files already present in `done_dir` or whose translated counterpart already exists in `output_dir` are skipped.
 
+### Verify the proxy
+
+`boto3` does not honor the standard `HTTPS_PROXY` env var the way `requests` does, and a misconfigured HTTP proxy (e.g. Privoxy running without a working SOCKS upstream) will silently let traffic through with your local IP. The `check-proxy` subcommand makes this easy to diagnose:
+
+```bash
+python main.py check-proxy --config my_config.json
+```
+
+Sample output:
+
+```
+Proxy:     http://127.0.0.1:8118
+Probe URL: https://checkip.amazonaws.com
+Exit IP:   104.16.x.x
+Notes:     If this IP is your own machine or a region Anthropic blocks
+           (e.g. China), the proxy is reachable but not actually
+           forwarding traffic abroad. ...
+```
+
+You can also test a proxy without changing your config:
+
+```bash
+python main.py check-proxy --proxy-url http://127.0.0.1:8118
+python main.py check-proxy --proxy-url ""     # test the direct connection
+```
+
+When `verify_proxy_on_startup` is enabled (the default), every `translate` / `batch` run also logs the proxy's exit IP at startup.
+
 ### Use as a library
 
 ```python
@@ -113,6 +143,7 @@ All options live in a JSON file (or can be overridden on the CLI). The most impo
 | `aws_region` | `us-west-2` | AWS region for Bedrock. |
 | `max_tokens` | `4096` | Max tokens the model may return per call. |
 | `proxy_url` | `null` | Optional HTTP(S) proxy for provider traffic, e.g. `"http://127.0.0.1:8118"`. Leave `null` for a direct connection. |
+| `verify_proxy_on_startup` | `true` | When `proxy_url` is set, probe it at startup (via `checkip.amazonaws.com`) and log the exit IP. Set to `false` to skip the probe. |
 | `source_language` | `en` | Source language code. |
 | `target_language` | `zh` | Target language code (also used as the output file suffix, e.g. `name-zh.vtt`). |
 | `chunk_size` | `50` | Number of captions per LLM call. Larger = fewer calls + better global context, but more tokens per call. |
@@ -178,6 +209,7 @@ vtt-translator/
     ├── chunker.py             # chunking with context windows
     ├── progress.py            # resumable-translation progress store
     ├── prompt_builder.py      # numbered-batch prompt templates
+    ├── proxy_diagnostics.py   # exit-IP probe for proxy_url (stdlib only)
     ├── validator.py           # parse + validate LLM responses
     ├── translator.py          # single-file orchestrator (concurrent chunks)
     ├── manager.py             # batch manager

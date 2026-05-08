@@ -1,10 +1,11 @@
 """CLI entry point for vtt-translator.
 
 Subcommands:
-  translate   Translate a single VTT file.
-  batch       Translate all unprocessed VTT files in a directory.
-  config      Generate a default config file.
-  estimate    Dry-run: parse and chunk a file, print stats without calling the LLM.
+  translate    Translate a single VTT file.
+  batch        Translate all unprocessed VTT files in a directory.
+  config       Generate a default config file.
+  estimate     Dry-run: parse and chunk a file, print stats without calling the LLM.
+  check-proxy  Verify that the configured proxy is reachable and report its exit IP.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 from vtt_translator.chunker import split_into_chunks
 from vtt_translator.config import Config
 from vtt_translator.manager import VttTranslatorManager
+from vtt_translator.proxy_diagnostics import check_proxy
 from vtt_translator.translator import VttTranslator
 from vtt_translator.utils import setup_logger
 from vtt_translator.vtt_parser import parse_vtt
@@ -64,6 +66,23 @@ def _build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("estimate", help="Dry-run: parse & chunk a file without calling the LLM")
     e.add_argument("input", help="Input VTT file")
     _add_common_config_args(e)
+
+    d = sub.add_parser(
+        "check-proxy",
+        help="Probe the configured proxy and print the exit IP (no LLM calls)",
+    )
+    d.add_argument("--config", help="Path to JSON config file")
+    d.add_argument(
+        "--proxy-url",
+        help=(
+            "Proxy URL to test, overriding config.proxy_url. "
+            "Use '' (empty) or omit both to test the direct connection."
+        ),
+    )
+    d.add_argument(
+        "--timeout", type=float, default=10.0,
+        help="Probe timeout in seconds (default 10)",
+    )
 
     return parser
 
@@ -145,11 +164,25 @@ def _cmd_estimate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check_proxy(args: argparse.Namespace) -> int:
+    cfg = Config.load(getattr(args, "config", None))
+    # CLI override: an explicit empty string means "test direct".
+    if args.proxy_url is not None:
+        proxy_url = args.proxy_url or None
+    else:
+        proxy_url = cfg.proxy_url
+
+    result = check_proxy(proxy_url, timeout=args.timeout)
+    print(result.format())
+    return 0 if result.ok else 1
+
+
 _COMMANDS = {
     "translate": _cmd_translate,
     "batch": _cmd_batch,
     "config": _cmd_config,
     "estimate": _cmd_estimate,
+    "check-proxy": _cmd_check_proxy,
 }
 
 

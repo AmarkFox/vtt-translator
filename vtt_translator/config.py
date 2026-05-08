@@ -55,6 +55,16 @@ class Config(BaseModel):
             "to the provider go through this proxy. Leave null to connect directly."
         ),
     )
+    verify_proxy_on_startup: bool = Field(
+        default=True,
+        description=(
+            "When a proxy_url is set, probe it once at startup to discover "
+            "the exit IP and log it. Adds roughly one HTTP request of "
+            "latency. Has no effect when proxy_url is null. Set to false "
+            "to skip the probe (e.g. in environments where the IP echo "
+            "service is blocked but AWS itself is reachable)."
+        ),
+    )
 
     # -------- Languages --------
     source_language: str = Field(default="en", description="Source language code")

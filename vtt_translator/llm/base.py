@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Optional
 
 
 class TranslationError(Exception):
@@ -23,8 +24,23 @@ class LLMProvider(ABC):
     """
 
     @abstractmethod
-    def complete(self, prompt: str, *, max_tokens: int) -> str:
-        """Send a prompt to the model and return its text response."""
+    def complete(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        tag: Optional[str] = None,
+    ) -> str:
+        """Send a prompt to the model and return its text response.
+
+        Args:
+            prompt: The user prompt to send.
+            max_tokens: Maximum tokens in the model response.
+            tag: Optional caller-provided label (e.g. "chunk 3/12") that
+                implementations should include in retry/error log messages
+                so operators can tell which work item failed. Implementations
+                are free to ignore it.
+        """
         raise NotImplementedError
 
     @property

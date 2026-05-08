@@ -9,6 +9,7 @@
     "aws_region": "us-west-2",
     "max_tokens": 4096,
     "proxy_url": null,
+    "verify_proxy_on_startup": true,
 
     "source_language": "en",
     "target_language": "zh",

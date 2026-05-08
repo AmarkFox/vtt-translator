@@ -8,6 +8,7 @@
     "model_id": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
     "aws_region": "us-west-2",
     "max_tokens": 4096,
+    "proxy_url": null,
 
     "source_language": "en",
     "target_language": "zh",

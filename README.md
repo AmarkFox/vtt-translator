@@ -32,7 +32,8 @@ A Python tool that translates WebVTT subtitle files using LLMs. Version 2.x uses
 # 1. Clone & install (Python 3.10+)
 git clone https://github.com/AmarkFox/vtt-translator.git
 cd vtt-translator
-pip install -r requirements.txt
+pip install .              # or: pip install -e . for development
+# pip install -r requirements.txt also works
 
 # 2. Configure AWS credentials (any standard method works)
 aws configure
@@ -92,6 +93,7 @@ python main.py translate <input.vtt> <output.vtt> [options]
 | `--context-window` | int | — | Override `context_window`. |
 | `--max-concurrent-chunks` | int | — | Override `max_concurrent_chunks`. |
 | `--no-resume` | flag | off | Ignore any existing progress file and retranslate from scratch. Also deletes the stale progress file. |
+| `--glossary` | path | — | Path to a JSON glossary file for domain-specific term consistency (see [Glossary](#glossary)). |
 | `--verbose` / `-v` | flag | off | DEBUG logging. |
 
 **Examples:**
@@ -252,7 +254,7 @@ Most options can also be overridden per-run via CLI flags; see each command's ta
 | `provider` | `bedrock` | LLM backend. Today only `bedrock` is implemented — the abstraction in `vtt_translator/llm/` is ready for OpenAI / Gemini / local models. |
 | `model_id` | `global.anthropic.claude-opus-4-6-v1` | Model ID the provider understands. For Bedrock this is the inference-profile ARN short form. |
 | `aws_region` | `us-west-2` | AWS region. Must have Bedrock model access enabled for the chosen `model_id`. |
-| `max_tokens` | `4096` | Cap on the LLM response size per call. 4096 is enough for ~50 Chinese captions; raise if you use a larger `chunk_size`. |
+| `max_tokens` | `4096` | Base cap on the LLM response size per call. The actual limit used is `max(max_tokens, chunk_size × 128)`, so it auto-scales for large chunks. 4096 is enough for the default `chunk_size=50`. |
 | `proxy_url` | `null` | HTTP(S) proxy URL for all Bedrock traffic, e.g. `"http://127.0.0.1:8118"`. `null` = direct connection. Set this if Anthropic blocks your region — they do a server-side IP check. |
 | `verify_proxy_on_startup` | `true` | Probe `proxy_url` once at startup and log the exit IP. Adds ~one HTTP round-trip. Set to `false` if the probe service is blocked in your network but AWS is reachable. |
 
@@ -262,6 +264,31 @@ Most options can also be overridden per-run via CLI flags; see each command's ta
 |---|---|---|
 | `source_language` | `en` | Source language code. Used in the prompt so the model knows what to translate. |
 | `target_language` | `zh` | Target language code. Used in the prompt **and** as the output file suffix (e.g. `-zh.vtt`). Supported codes include `en`, `zh`, `zh-hant`, `ja`, `ko`, `es`, `fr`, `de`, `pt`, `ru`, `it`, `ar`. Unknown codes work too — they're just passed through verbatim. |
+
+### Model parameters
+
+| Key | Default | What it's for |
+|---|---|---|
+| `temperature` | `0.3` | Sampling temperature (0.0–1.0). Lower values produce more deterministic, consistent translations. The default 0.3 is a good balance for subtitle translation — high enough to sound natural, low enough to avoid creative drift. |
+
+### Glossary
+
+| Key | Default | What it's for |
+|---|---|---|
+| `glossary_file` | `null` | Path to a JSON glossary file. When set, the glossary is injected into the system prompt so the model uses consistent translations for domain-specific terms. |
+
+The glossary file is a simple JSON object mapping source terms to target translations:
+
+```json
+{
+  "cache": "缓存",
+  "eviction policy": "淘汰策略",
+  "LRU": "LRU",
+  "load balancer": "负载均衡器"
+}
+```
+
+Use via CLI: `--glossary glossary.json`, or in the config: `"glossary_file": "glossary.json"`. Different files can be used per translation run to match the domain.
 
 ### Chunking
 
@@ -330,10 +357,11 @@ These apply to transient errors from the LLM provider — rate-limit 429s, serve
   ThreadPoolExecutor(max_concurrent_chunks) — process chunks that still need work
       │
       ▼ per chunk:
-  build_batch_prompt ──► "[1] caption 1\n[2] caption 2\n..." + context sections
-      │
+  build_batch_prompt ──► (system_prompt, user_prompt)
+      │                     system: translator role + rules + glossary (if configured)
+      │                     user:   context sections + "[1] caption 1\n[2] caption 2\n..."
       ▼
-  LLMProvider.complete ──► raw text response
+  LLMProvider.complete(prompt, system=..., temperature=...) ──► raw text response
       │                    (retries on transient errors with exponential backoff + jitter)
       │
       ▼
@@ -430,7 +458,7 @@ If your account is generous and you want to blast through a directory, set both 
 On startup, `batch` excludes a file if:
 - the source has already been moved to `done_dir/<name>.vtt`, OR
 - the translated output already exists at `output_dir/<name>-<target_language>.vtt`, OR
-- the filename ends in `-zh.vtt` or `_zh.vtt` (legacy/safety net — won't try to translate a translation)
+- the filename ends in `-<target_language>.vtt` or `_<target_language>.vtt` (prevents translating an already-translated file)
 
 This means `Ctrl+C` and re-running is safe: finished files are skipped, the in-flight file resumes via the progress store, and unprocessed files continue fresh.
 
@@ -463,7 +491,7 @@ class MyProvider(LLMProvider):
     @property
     def model_id(self):
         return "my-model"
-    def complete(self, prompt, *, max_tokens, tag=None):
+    def complete(self, prompt, *, max_tokens, system=None, temperature=None, tag=None):
         # your implementation
         ...
 
@@ -476,20 +504,27 @@ VttTranslator(cfg, provider=MyProvider()).translate_vtt(...)
 
 ```
 vtt-translator/
-├── main.py                         # CLI entry point
-├── requirements.txt
+├── main.py                         # Convenience entry point (delegates to vtt_translator.cli)
+├── pyproject.toml                  # Package metadata, deps, console_scripts (vttt)
+├── requirements.txt                # Backward-compatible dependency list
 ├── README.md                       # this file
 ├── docs/
 │   └── DESIGN.md                   # how the current design came to be (handoff notes)
 ├── examples/
 │   └── config.example.json         # every config field with a value
+├── tests/                          # pytest suite (108 tests, 89% coverage)
+│   ├── conftest.py                 # FakeProvider + shared fixtures
+│   ├── fixtures/                   # sample VTT files for testing
+│   └── test_*.py                   # 13 test modules
 └── vtt_translator/
     ├── __init__.py                 # public API: Config, VttTranslator, VttTranslatorManager
+    ├── __main__.py                 # python -m vtt_translator support
+    ├── cli.py                      # CLI argument parsing and command dispatch
     ├── config.py                   # pydantic Config model + Config.load/save/resume_fingerprint
     ├── utils.py                    # logger setup, file helpers
     ├── vtt_parser.py               # webvtt-py based Caption dataclass, parse_vtt, write_vtt
     ├── chunker.py                  # Chunk dataclass + split_into_chunks (with context windows)
-    ├── prompt_builder.py           # numbered-batch prompt templates
+    ├── prompt_builder.py           # system/user prompt builder with glossary support
     ├── validator.py                # parse_numbered_response + validate_coverage
     ├── translator.py               # single-file orchestrator (concurrent chunks + resume)
     ├── progress.py                 # ProgressStore (atomic-write, per-caption checkpoint)
@@ -534,10 +569,15 @@ The model occasionally produces a paragraph instead of a numbered list. The orch
 
 ## Roadmap
 
+**Done:**
+- ~~Glossary / term-list injection for domain-specific consistency.~~ (PR #8)
+- ~~`pytest` suite (108 tests, 89% coverage) + `pyproject.toml` for pip-install.~~ (PR #6, #7)
+- ~~System message separation + temperature control for translation quality.~~ (PR #8)
+
+**Remaining:**
 - File-level concurrency in `batch` mode (`max_concurrent_files`).
 - Token counting + cost estimation (in `estimate` and post-run).
 - Additional providers — OpenAI, Gemini, local models via the existing `LLMProvider` interface.
-- Glossary / term-list injection for domain-specific consistency.
-- `pytest` suite + GitHub Actions CI + `pyproject.toml` for pip-install.
+- GitHub Actions CI (`pytest` + `ruff` on every PR).
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the history of why things are the way they are, plus the open decisions waiting for the next contributor.

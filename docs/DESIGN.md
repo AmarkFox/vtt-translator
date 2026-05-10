@@ -144,6 +144,13 @@ A running list of decisions that aren't self-explanatory from the code.
 | Thread pool for concurrency (not async) | Bedrock calls are I/O-bound, `boto3` is thread-safe but not natively async; wrapping it in async would require `aiobotocore` or a threadpool executor anyway. Threads keep the model simple. |
 | Proxy via `botocore.config.Config` (not env) | `boto3` doesn't read `HTTPS_PROXY`. Explicit config field = predictable behavior. |
 | `checkip.amazonaws.com` for proxy probe | Same host family as the real target (Bedrock). If the probe works, the real call should too. |
+| System message separated from user prompt | Anthropic Messages API supports a dedicated `system` field. Separating it enables prompt caching across chunks (same system prompt reused), clearer role distinction, and slightly better adherence to formatting rules. |
+| Default `temperature=0.3` | Translation benefits from low temperature — deterministic enough for consistency, high enough to sound natural. The default 1.0 produced noticeably more creative (i.e. inconsistent) phrasing across chunks. |
+| Dynamic `max_tokens = max(config, chunk_size × 128)` | Prevents truncation for large chunk sizes while staying backward-compatible with existing configs. The multiplier 128 is conservative — typical Chinese subtitle output is ~60–80 tokens per caption. |
+| Glossary via JSON file (not inline config) | Glossaries are domain-specific and change per video/course. A file path (`glossary_file`) is easier to swap per-run than editing config. Injected into the system prompt as a `<glossary>` block with "MUST use" wording. |
+| Cached SHA-1 in ProgressStore | The input file's SHA-1 was recomputed on every `update()` call (once per chunk). Now computed once and cached — the input file doesn't change during a translation run. |
+| Dynamic `-{lang}.vtt` filter (not hardcoded `-zh.vtt`) | `manager.find_vtt_files` previously hardcoded `-zh.vtt`/`_zh.vtt` skip logic. Now uses `config.target_language` dynamically so non-Chinese targets work correctly. |
+| `pyproject.toml` + `vttt` console entry point | Enables `pip install .` and a global `vttt` command. CLI logic extracted to `vtt_translator/cli.py`; `main.py` is a thin wrapper for backward compat. |
 
 ---
 
@@ -155,6 +162,7 @@ Things that might look wrong but aren't.
 - **Per-file and main loggers use different names and only the main one logs to console.** The alternative (a single logger) would either flood the console on batch runs or silence per-file logs. The current setup lets the console show batch-level progress while each file has a full trace in its own log file.
 - **`Config.max_concurrent_files` is declared but unused.** It's a reservation for the future file-level concurrency feature. Leaving it there means the field name is stable when we add the feature; users who write configs now won't have to re-learn it later.
 - **The CLI `config` subcommand overwrites without prompting.** If you're worried about clobbering an existing file, use a path that doesn't exist. A prompt would require adding a flag to suppress it for scripting, and so far nobody's hit the problem.
+- **`main.py` still exists at the repo root.** It's a thin wrapper that imports `vtt_translator.cli.main()`. Kept for users who type `python main.py` out of habit. The canonical entry point is now `vttt` (via `pyproject.toml` console_scripts).
 
 ---
 
@@ -185,41 +193,30 @@ Warning: cross-provider tokenizers are different. Anthropic doesn't publish an o
 ### 3. Non-Bedrock providers
 
 The `LLMProvider` abstraction is set up for this. Adding OpenAI would be:
-- `vtt_translator/llm/openai.py` — subclass `LLMProvider`, implement `complete(prompt, *, max_tokens, tag)` using the OpenAI SDK.
+- `vtt_translator/llm/openai.py` — subclass `LLMProvider`, implement `complete(prompt, *, max_tokens, system, temperature, tag)` using the OpenAI SDK.
 - Extend `create_provider(config)` in `factory.py` with a new branch.
 - Update `Config` with any OpenAI-specific fields (e.g. `openai_base_url` for Azure).
-- The `tag` keyword is already part of the interface and used in retry logs.
+- The `system`, `temperature`, and `tag` keywords are already part of the interface.
 
 There's **no change needed in the orchestrator** — `translator.py` never mentions Bedrock.
 
-### 4. Glossary / term list
+### ~~4. Glossary / term list~~ ✅ Done (PR #8)
 
-Professional videos (like the lecture transcripts this tool was built for) have domain terms that should translate consistently. Right now consistency is emergent from the chunk+context strategy, but a user-provided glossary would guarantee it.
+Implemented as `Config.glossary_file: Optional[Path]` pointing to a JSON file. The glossary is injected into the system prompt as a `<glossary>` block. CLI flag: `--glossary`. See README for usage.
 
-Rough shape:
-- `Config.glossary: Optional[Dict[str, str]]` — e.g. `{"LRU": "LRU", "cache": "缓存", "eviction policy": "淘汰策略"}`.
-- `prompt_builder.build_batch_prompt` includes a "must use these translations" section at the top.
-- Validator optionally checks the output contains the forced translations.
+### ~~5. Tests + CI + packaging~~ ✅ Mostly done (PR #6, #7)
 
-Risk: models sometimes "explain around" forced terminology awkwardly. Test on a few real files before shipping.
+- **Tests**: 108 pytest tests, 89% coverage. `FakeProvider` echoes numbered prompts deterministically. All modules covered.
+- **Packaging**: `pyproject.toml` with hatchling, `pip install .` works, `vttt` console entry point. CLI logic lives in `vtt_translator/cli.py`; `main.py` is a backward-compat wrapper.
+- **CI**: Not yet done — GitHub Actions workflow running `pytest` + `ruff` on every PR is still open.
 
-### 5. Tests + CI + packaging
-
-Three things:
-- **Tests**: the smoke tests I wrote during each PR cover real behavior but were never committed. They should be formalized into a `tests/` directory with `pytest`. The LLM provider abstraction makes this easy — a `FakeProvider` can echo numbered prompts deterministically.
-- **CI**: GitHub Actions workflow running `pytest` + `ruff` on every PR. Shouldn't take more than a morning.
-- **Packaging**: add `pyproject.toml` so `pip install .` works. The `main.py` at the repo root is awkward for pip-install; you'd want to move the CLI entry point to a module (`vtt_translator/__main__.py` or similar) and declare a console_scripts entry.
-
-The owner deferred all of this explicitly, reasoning that it's "individual engineering hygiene" more than "feature value" for a personal tool. Revisit when the tool has more than one user, or when "it broke and I don't know why" happens more than once.
-
-### 6. Line-level tweaks you might notice
+### 4. Line-level tweaks you might notice
 
 Minor things that didn't seem worth a PR but might bug you:
 
 - `Config` mixes units (sleep times in seconds, tokens as counts). Not harmful, but a future refactor could split into `ConfigLLM`, `ConfigBatch`, `ConfigPaths` nested models.
 - `translator.py` ETA calculation uses `time.monotonic()` and a simple "elapsed / completed × remaining" estimator. A median-of-recent-chunk-times estimator would be more stable for workloads where the first chunks are slower (e.g. cold cache).
 - `_source_fallback` doesn't re-emit a warning log — just the chunk-level warning. If lots of captions fall back, the summary line shows the count but you have to diff against the input to find *which*. A `fallback_marker: "[SRC]"` mitigates this but it's opt-in.
-- The `manager.find_vtt_files` string-ends-with check for already-translated files looks for `-zh.vtt` and `_zh.vtt` specifically. If someone runs with `target_language=ja`, the `-ja.vtt` check comes from the dynamically-computed `translated_name`, so it works — but the hardcoded `-zh.vtt` / `_zh.vtt` check is a legacy safety net and could be dropped.
 
 ---
 
@@ -228,11 +225,11 @@ Minor things that didn't seem worth a PR but might bug you:
 If you're an AI agent or new human maintainer landing here:
 
 1. **Read `README.md` first** for the user-facing model.
-2. **Read `main.py`** to see the CLI surface.
+2. **Read `vtt_translator/cli.py`** to see the CLI surface.
 3. **Read `vtt_translator/translator.py`** — that's the pipeline in one file.
 4. **Read `vtt_translator/config.py`** — all knobs are here.
 5. **Skim `vtt_translator/llm/base.py`** — that's the extension point.
-6. **Use the smoke-test pattern from the PR history** (fake `LLMProvider` that echoes numbered prompts) for any new feature work. Don't commit smoke tests directly; graduate them to `pytest` when [Open question 5](#5-tests--ci--packaging) happens.
+6. **Run `pytest -v`** to verify everything works. The test suite uses `FakeProvider` (in `tests/conftest.py`) — use the same pattern for new feature work.
 
 Before starting a change:
 - Ask the owner which principle it's against, if any (see [Guiding principles](#guiding-principles)).

@@ -8,11 +8,13 @@
     "model_id": "global.anthropic.claude-opus-4-6-v1",
     "aws_region": "us-west-2",
     "max_tokens": 4096,
+    "temperature": 0.3,
     "proxy_url": null,
     "verify_proxy_on_startup": true,
 
     "source_language": "en",
     "target_language": "zh",
+    "glossary_file": null,
 
     "chunk_size": 50,
     "context_window": 5,

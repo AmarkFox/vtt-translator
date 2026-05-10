@@ -1,0 +1,13 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:03.000
+This is a caption
+that spans multiple lines.
+
+00:00:03.500 --> 00:00:06.000
+Single line caption here.
+
+00:00:06.500 --> 00:00:10.000
+Another multi-line
+caption with
+three lines total.

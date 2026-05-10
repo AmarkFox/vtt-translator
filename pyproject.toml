@@ -19,5 +19,12 @@ dependencies = [
 [project.scripts]
 vttt = "vtt_translator.__main__:main"
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: tests that do real I/O (file system)"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["vtt_translator"]

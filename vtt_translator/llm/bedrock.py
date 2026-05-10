@@ -92,6 +92,8 @@ class BedrockProvider(LLMProvider):
         prompt: str,
         *,
         max_tokens: int,
+        system: Optional[str] = None,
+        temperature: Optional[float] = None,
         tag: Optional[str] = None,
     ) -> str:
         """Call the model with a single user prompt and return its text.
@@ -99,15 +101,24 @@ class BedrockProvider(LLMProvider):
         Args:
             prompt: The user prompt to send.
             max_tokens: Maximum tokens in the model response.
+            system: Optional system-level instructions. Passed as the
+                top-level ``system`` field in the Anthropic Messages API,
+                enabling prompt caching across calls with the same system.
+            temperature: Sampling temperature (0.0–1.0). None uses the
+                model default.
             tag: Optional caller-provided label (e.g. "chunk 3/12") that is
                 included in retry/backoff log lines so operators can tell
                 which work item is being retried.
         """
-        body = {
+        body: dict = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
+        if system:
+            body["system"] = system
+        if temperature is not None:
+            body["temperature"] = temperature
 
         def _invoke() -> str:
             response = self._client.invoke_model(

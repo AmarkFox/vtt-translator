@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 from .chunker import Chunk
 from .vtt_parser import Caption
@@ -18,8 +18,14 @@ Rules:
 3. Keep the translation natural and idiomatic in {target_lang}; do not add explanations or notes.
 4. If a subtitle is a continuation of the previous one (e.g. cut mid-sentence), translate it so that the combined result reads naturally in {target_lang}.
 5. Preserve proper nouns, code identifiers, numbers, and URLs unchanged.
-6. Do NOT output any other content besides the numbered lines.
-"""
+6. Do NOT output any other content besides the numbered lines."""
+
+
+GLOSSARY_TEMPLATE = """
+<glossary>
+You MUST use the following translations for these terms:
+{entries}
+</glossary>"""
 
 
 def _format_context_block(label: str, captions: List[Caption]) -> str:
@@ -32,18 +38,37 @@ def _format_context_block(label: str, captions: List[Caption]) -> str:
     return "\n".join(lines)
 
 
-def build_batch_prompt(chunk: Chunk, source_lang: str, target_lang: str) -> str:
+def _format_glossary(glossary: Optional[Dict[str, str]]) -> str:
+    """Format glossary dict into a prompt section."""
+    if not glossary:
+        return ""
+    entries = "\n".join(f"- {src} → {tgt}" for src, tgt in glossary.items())
+    return GLOSSARY_TEMPLATE.format(entries=entries)
+
+
+def build_batch_prompt(
+    chunk: Chunk,
+    source_lang: str,
+    target_lang: str,
+    glossary: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str]:
     """Build a numbered-batch translation prompt for a single chunk.
 
-    Target subtitles are numbered 1..N within the chunk. The caller must map
-    those numbers back to the original Caption.index.
+    Returns:
+        A tuple of (system_prompt, user_prompt). The system prompt contains
+        the translator role and rules; the user prompt contains the actual
+        subtitles to translate with context.
     """
     system = SYSTEM_INSTRUCTIONS_TEMPLATE.format(
         source_lang=source_lang,
         target_lang=target_lang,
     )
+    glossary_section = _format_glossary(glossary)
+    if glossary_section:
+        system += glossary_section
 
-    parts: List[str] = [system]
+    # User prompt: context + numbered lines
+    parts: List[str] = []
 
     prev_block = _format_context_block("preceding_context", chunk.prev_context)
     if prev_block:
@@ -59,13 +84,29 @@ def build_batch_prompt(chunk: Chunk, source_lang: str, target_lang: str) -> str:
         parts.append(next_block)
 
     parts.append("Now produce the translated lines:")
-    return "\n\n".join(parts)
+    user_prompt = "\n\n".join(parts)
+
+    return system, user_prompt
 
 
-def build_single_prompt(text: str, source_lang: str, target_lang: str) -> str:
-    """Build a prompt for translating a single caption (single-item fallback)."""
-    return (
-        f"Translate the following {source_lang} subtitle to {target_lang}. "
-        f"Output only the translated text, nothing else.\n\n"
-        f"{text}"
+def build_single_prompt(
+    text: str,
+    source_lang: str,
+    target_lang: str,
+    glossary: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str]:
+    """Build a prompt for translating a single caption (fallback).
+
+    Returns:
+        A tuple of (system_prompt, user_prompt).
+    """
+    system = (
+        f"You are a professional subtitle translator. "
+        f"Translate from {source_lang} to {target_lang}. "
+        f"Output only the translated text, nothing else."
     )
+    glossary_section = _format_glossary(glossary)
+    if glossary_section:
+        system += glossary_section
+
+    return system, text

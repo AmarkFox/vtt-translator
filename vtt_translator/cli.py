@@ -40,6 +40,9 @@ def _add_common_config_args(p: argparse.ArgumentParser) -> None:
         "--no-resume", action="store_true",
         help="Ignore any existing progress file and retranslate from scratch",
     )
+    p.add_argument(
+        "--glossary", help="Path to a JSON glossary file for domain-specific term consistency",
+    )
     p.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
 
 
@@ -99,6 +102,7 @@ def _load_config_from_args(args: argparse.Namespace) -> Config:
         "chunk_size": getattr(args, "chunk_size", None),
         "context_window": getattr(args, "context_window", None),
         "max_concurrent_chunks": getattr(args, "max_concurrent_chunks", None),
+        "glossary_file": getattr(args, "glossary", None),
         "input_dir": getattr(args, "input_dir", None),
         "output_dir": getattr(args, "output_dir", None),
         "done_dir": getattr(args, "done_dir", None),

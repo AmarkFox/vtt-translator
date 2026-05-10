@@ -69,6 +69,9 @@ class ProgressStore:
         self._fingerprint = dict(config_fingerprint)
         self._translations: Dict[int, str] = {}
         self._dirty_lock = Lock()
+        # Cached SHA1 of the input file — computed once and reused across
+        # multiple _flush_locked() calls within the same run.
+        self._input_sha1: Optional[str] = None
 
         progress_dir = Path(log_dir) / _PROGRESS_DIR_NAME
         self.progress_file = progress_dir / f"{_path_key(self.input_file)}.json"
@@ -183,7 +186,11 @@ class ProgressStore:
             # resolution while still catching real edits.
             return False
         actual_sha = _sha1_file(self.input_file)
-        return actual_sha == expected_sha
+        if actual_sha == expected_sha:
+            # Cache the SHA1 so _flush_locked() doesn't recompute it.
+            self._input_sha1 = actual_sha
+            return True
+        return False
 
     def _flush_locked(self) -> None:
         """Write the current state to disk atomically. Caller must hold the lock."""
@@ -196,10 +203,14 @@ class ProgressStore:
             self.logger.warning("Cannot stat input %s while saving progress: %s", self.input_file, e)
             return
 
+        # Use cached SHA1 if available; compute and cache on first flush.
+        if self._input_sha1 is None:
+            self._input_sha1 = _sha1_file(self.input_file)
+
         payload = {
             "version": _PROGRESS_SCHEMA_VERSION,
             "input_file": str(self.input_file),
-            "input_sha1": _sha1_file(self.input_file),
+            "input_sha1": self._input_sha1,
             "input_mtime": stat.st_mtime,
             "config_fingerprint": self._fingerprint,
             "translations": {str(k): v for k, v in self._translations.items()},

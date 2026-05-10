@@ -57,7 +57,8 @@ class VttTranslatorManager:
         for name in os.listdir(dir_):
             if not name.endswith(".vtt"):
                 continue
-            if name.endswith("-zh.vtt") or name.endswith("_zh.vtt"):
+            lang = self.config.target_language
+            if name.endswith(f"-{lang}.vtt") or name.endswith(f"_{lang}.vtt"):
                 continue
             if (self.config.done_dir / name).exists():
                 continue

@@ -66,6 +66,12 @@ class Config(BaseModel):
         ),
     )
 
+    # -------- Model parameters --------
+    temperature: float = Field(
+        default=0.3, ge=0.0, le=1.0,
+        description="Sampling temperature (0.0-1.0). Lower values produce more deterministic translations.",
+    )
+
     # -------- Languages --------
     source_language: str = Field(default="en", description="Source language code")
     target_language: str = Field(default="zh", description="Target language code")
@@ -101,6 +107,16 @@ class Config(BaseModel):
         description=(
             "Max chunks translated in parallel per file. Higher = faster but more "
             "likely to hit provider rate limits; start small and raise if stable."
+        ),
+    )
+
+    # -------- Glossary --------
+    glossary_file: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Path to a JSON glossary file (e.g. {\"cache\": \"缓存\"}). "
+            "Terms in the glossary are injected into the system prompt so "
+            "the model uses consistent translations for domain terms."
         ),
     )
 

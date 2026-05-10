@@ -17,6 +17,7 @@ Strategy:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -61,6 +62,27 @@ class VttTranslator:
         self.config = config or Config()
         self.logger = logger or logging.getLogger(__name__)
         self.provider = provider or create_provider(self.config, self.logger)
+        self._glossary = self._load_glossary()
+
+    def _load_glossary(self) -> Optional[Dict[str, str]]:
+        """Load glossary from the configured JSON file, if any."""
+        if not self.config.glossary_file:
+            return None
+        path = Path(self.config.glossary_file)
+        if not path.exists():
+            self.logger.warning("Glossary file not found: %s; continuing without glossary", path)
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                glossary = json.load(f)
+            if not isinstance(glossary, dict):
+                self.logger.warning("Glossary file %s is not a JSON object; ignoring", path)
+                return None
+            self.logger.info("Loaded glossary with %d term(s) from %s", len(glossary), path)
+            return glossary
+        except (OSError, json.JSONDecodeError) as e:
+            self.logger.warning("Failed to load glossary %s: %s; continuing without", path, e)
+            return None
 
     # ---------------------------------------------------------------- API
     def translate_vtt(
@@ -288,6 +310,10 @@ class VttTranslator:
 
         return results, failure_count
 
+    def _effective_max_tokens(self) -> int:
+        """Compute max_tokens: at least config.max_tokens, scaled up for large chunks."""
+        return max(self.config.max_tokens, self.config.chunk_size * 128)
+
     def _call_with_chunk_retry(
         self, chunk: Chunk, *, tag: str = "chunk",
     ) -> Dict[int, str]:
@@ -297,14 +323,19 @@ class VttTranslator:
         expected = len(chunk.target)
 
         while attempt <= _CHUNK_RETRY_LIMIT:
-            prompt = build_batch_prompt(
+            system, user_prompt = build_batch_prompt(
                 chunk,
                 source_lang=self.config.source_language_name(),
                 target_lang=self.config.target_language_name(),
+                glossary=self._glossary,
             )
             try:
                 response = self.provider.complete(
-                    prompt, max_tokens=self.config.max_tokens, tag=tag,
+                    user_prompt,
+                    max_tokens=self._effective_max_tokens(),
+                    system=system,
+                    temperature=self.config.temperature,
+                    tag=tag,
                 )
             except TranslationError as e:
                 self.logger.error(
@@ -334,15 +365,18 @@ class VttTranslator:
         self, cap: Caption, *, tag: str = "single-caption",
     ) -> Optional[str]:
         """Translate a single caption in isolation. Returns None on failure."""
-        prompt = build_single_prompt(
+        system, user_prompt = build_single_prompt(
             cap.text,
             source_lang=self.config.source_language_name(),
             target_lang=self.config.target_language_name(),
+            glossary=self._glossary,
         )
         try:
             text = self.provider.complete(
-                prompt,
+                user_prompt,
                 max_tokens=self.config.max_tokens,
+                system=system,
+                temperature=self.config.temperature,
                 tag=f"{tag}/cap-{cap.index}",
             )
         except TranslationError as e:

@@ -41,6 +41,8 @@ class FakeProvider(LLMProvider):
         prompt: str,
         *,
         max_tokens: int,
+        system: Optional[str] = None,
+        temperature: Optional[float] = None,
         tag: Optional[str] = None,
     ) -> str:
         idx = self._call_count

@@ -1,0 +1,16 @@
+WEBVTT
+
+00:00:00.500 --> 00:00:03.000
+Hello and welcome to this course.
+
+00:00:03.500 --> 00:00:06.000
+Today we will discuss caching strategies.
+
+00:00:06.500 --> 00:00:09.000
+Caching is essential for performance.
+
+00:00:09.500 --> 00:00:12.000
+Let's start with the basics.
+
+00:00:12.500 --> 00:00:15.000
+First, we need to understand memory hierarchy.
